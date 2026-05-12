@@ -5,12 +5,16 @@ Catégories : Géopolitique, Économie, Finance.
 Mode lecture seule par défaut pour tous les visiteurs.
 Mode admin (publier / modifier / supprimer) débloqué via mot de passe stocké dans st.secrets.
 
+Supporte l'upload d'images directement dans le formulaire.
+Les images sont stockées dans le dossier ./images/ et référencées en Markdown.
+
 Lancer en local : streamlit run app.py
 Déployer : pousser sur GitHub puis connecter à Streamlit Community Cloud.
 """
 
 import streamlit as st
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -21,9 +25,13 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Stockage des articles ---
+# --- Stockage des articles et images ---
 DATA_FILE = Path("articles.json")
+IMAGES_DIR = Path("images")
+IMAGES_DIR.mkdir(exist_ok=True)
+
 CATEGORIES = ["Géopolitique", "Économie", "Finance"]
+ALLOWED_IMAGE_TYPES = ["png", "jpg", "jpeg", "gif", "webp"]
 
 
 def load_articles():
@@ -73,31 +81,77 @@ def update_article(article_id, title, category, content):
     save_articles(articles)
 
 
+def save_uploaded_image(uploaded_file):
+    """
+    Sauvegarde une image uploadée dans le dossier images/
+    et retourne le chemin relatif pour Markdown.
+    """
+    extension = uploaded_file.name.split(".")[-1].lower()
+    # Nom unique pour éviter les collisions
+    filename = f"{uuid.uuid4().hex[:12]}.{extension}"
+    filepath = IMAGES_DIR / filename
+    with open(filepath, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return f"images/{filename}"
+
+
+def render_article_content(content):
+    """
+    Affiche le contenu d'un article.
+    Streamlit ne charge pas les images locales via st.markdown,
+    donc on traite séparément les images locales (./images/...)
+    et le reste du Markdown.
+    """
+    import re
+
+    # Pattern pour détecter les images Markdown locales : ![alt](images/xxx.ext)
+    pattern = r"!\[([^\]]*)\]\((images/[^)]+)\)"
+
+    last_end = 0
+    for match in re.finditer(pattern, content):
+        # Affiche le texte avant l'image
+        text_before = content[last_end:match.start()]
+        if text_before.strip():
+            st.markdown(text_before)
+
+        # Affiche l'image
+        alt_text = match.group(1)
+        image_path = match.group(2)
+        if Path(image_path).exists():
+            st.image(image_path, caption=alt_text if alt_text else None, use_column_width=True)
+        else:
+            st.warning(f"Image introuvable : {image_path}")
+
+        last_end = match.end()
+
+    # Affiche le texte restant après la dernière image
+    text_after = content[last_end:]
+    if text_after.strip():
+        st.markdown(text_after)
+
+
 # --- Gestion de l'authentification admin ---
 def get_admin_password():
-    """
-    Récupère le mot de passe admin depuis st.secrets.
-    Si la clé n'existe pas, retourne None (mode admin désactivé).
-    """
+    """Récupère le mot de passe admin depuis st.secrets."""
     try:
         return st.secrets["admin_password"]
     except (KeyError, FileNotFoundError):
         return None
 
 
-# État de session : par défaut, l'utilisateur n'est pas admin
+# État de session
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
-
-# État de session : ID de l'article en cours d'édition (None si aucun)
 if "editing_id" not in st.session_state:
     st.session_state.editing_id = None
+# Stocke les images uploadées en attente d'insertion (clé = ID du formulaire)
+if "pending_images" not in st.session_state:
+    st.session_state.pending_images = {}
 
 
 # --- Sidebar : navigation + login admin ---
 st.sidebar.title("📝 Mes analyses")
 
-# Bloc de connexion admin
 with st.sidebar.expander("🔐 Espace admin"):
     if st.session_state.is_admin:
         st.success("Connecté en admin")
@@ -121,7 +175,6 @@ with st.sidebar.expander("🔐 Espace admin"):
                 else:
                     st.error("Mot de passe incorrect")
 
-# Pages accessibles selon le mode
 if st.session_state.is_admin:
     page = st.sidebar.radio(
         "Navigation",
@@ -146,20 +199,38 @@ if page == "Lire les articles":
     if not articles:
         st.info("Aucun article publié pour le moment.")
     else:
-        # Filtre par catégorie
         filter_cat = st.selectbox(
             "Filtrer par catégorie",
             ["Toutes"] + CATEGORIES,
         )
 
         filtered = articles if filter_cat == "Toutes" else [a for a in articles if a["category"] == filter_cat]
-        # Tri du plus récent au plus ancien
         filtered = sorted(filtered, key=lambda a: a["id"], reverse=True)
 
         for article in filtered:
             with st.expander(f"**{article['title']}** — *{article['category']}* — {article['date']}"):
-                # Si cet article est en cours d'édition : afficher le formulaire d'édition
+                # Mode édition
                 if st.session_state.is_admin and st.session_state.editing_id == article["id"]:
+                    # Upload d'images hors du form (pour pouvoir générer le Markdown à insérer)
+                    st.markdown("**Ajouter des images à insérer dans l'article :**")
+                    edit_uploader_key = f"edit_uploader_{article['id']}"
+                    uploaded = st.file_uploader(
+                        "Glisse une ou plusieurs images",
+                        type=ALLOWED_IMAGE_TYPES,
+                        accept_multiple_files=True,
+                        key=edit_uploader_key,
+                    )
+                    if uploaded:
+                        st.markdown("**Markdown à copier-coller dans le contenu :**")
+                        for img_file in uploaded:
+                            # Sauvegarde seulement si pas déjà fait dans cette session
+                            cache_key = f"{edit_uploader_key}_{img_file.name}"
+                            if cache_key not in st.session_state.pending_images:
+                                path = save_uploaded_image(img_file)
+                                st.session_state.pending_images[cache_key] = path
+                            img_path = st.session_state.pending_images[cache_key]
+                            st.code(f"![{img_file.name}]({img_path})", language="markdown")
+
                     with st.form(f"edit_form_{article['id']}"):
                         new_title = st.text_input("Titre", value=article["title"])
                         new_category = st.selectbox(
@@ -196,9 +267,9 @@ if page == "Lire les articles":
                             st.session_state.editing_id = None
                             st.rerun()
 
-                # Sinon : affichage normal de l'article + boutons admin
+                # Affichage normal
                 else:
-                    st.markdown(article["content"])
+                    render_article_content(article["content"])
 
                     if st.session_state.is_admin:
                         col_edit, col_delete, _ = st.columns([1, 1, 4])
@@ -216,13 +287,38 @@ if page == "Lire les articles":
 elif page == "Publier un nouvel article":
     st.title("Publier un nouvel article")
 
+    # Upload d'images hors du form (pour pouvoir générer le Markdown à insérer)
+    st.markdown("**1. Ajouter des images (optionnel)**")
+    new_uploader_key = "new_article_uploader"
+    uploaded = st.file_uploader(
+        "Glisse une ou plusieurs images",
+        type=ALLOWED_IMAGE_TYPES,
+        accept_multiple_files=True,
+        key=new_uploader_key,
+    )
+    if uploaded:
+        st.markdown("**Markdown à copier-coller dans le contenu, à l'endroit où tu veux l'image :**")
+        for img_file in uploaded:
+            cache_key = f"{new_uploader_key}_{img_file.name}"
+            if cache_key not in st.session_state.pending_images:
+                path = save_uploaded_image(img_file)
+                st.session_state.pending_images[cache_key] = path
+            img_path = st.session_state.pending_images[cache_key]
+            st.code(f"![{img_file.name}]({img_path})", language="markdown")
+
+    st.markdown("**2. Rédiger l'article**")
     with st.form("new_article", clear_on_submit=True):
         title = st.text_input("Titre de l'article")
         category = st.selectbox("Catégorie", CATEGORIES)
         content = st.text_area(
             "Contenu (Markdown supporté)",
             height=400,
-            placeholder="Colle ton texte ici. Tu peux utiliser du Markdown : **gras**, *italique*, ## titres, etc.",
+            placeholder=(
+                "Colle ton texte ici. Tu peux utiliser du Markdown :\n"
+                "**gras**, *italique*, ## titres, etc.\n\n"
+                "Pour insérer une image : copie le code Markdown généré ci-dessus "
+                "et colle-le à l'endroit voulu."
+            ),
         )
         submitted = st.form_submit_button("Publier")
 
@@ -233,4 +329,9 @@ elif page == "Publier un nouvel article":
                 st.error("Le contenu ne peut pas être vide.")
             else:
                 add_article(title.strip(), category, content)
+                # Nettoyage des images en attente pour ce formulaire
+                st.session_state.pending_images = {
+                    k: v for k, v in st.session_state.pending_images.items()
+                    if not k.startswith(new_uploader_key)
+                }
                 st.success(f"Article « {title} » publié dans {category} !")
