@@ -2,13 +2,15 @@
 Mini-site personnel pour publier des analyses classées par catégorie.
 Catégories : Géopolitique, Économie, Finance.
 
+Mode lecture seule par défaut pour tous les visiteurs.
+Mode admin (publier / supprimer) débloqué via mot de passe stocké dans st.secrets.
+
 Lancer en local : streamlit run app.py
 Déployer : pousser sur GitHub puis connecter à Streamlit Community Cloud.
 """
 
 import streamlit as st
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -20,8 +22,6 @@ st.set_page_config(
 )
 
 # --- Stockage des articles ---
-# Les articles sont stockés dans un fichier JSON local.
-# Pour un usage personnel avec une seule URL, c'est largement suffisant.
 DATA_FILE = Path("articles.json")
 CATEGORIES = ["Géopolitique", "Économie", "Finance"]
 
@@ -60,12 +60,58 @@ def delete_article(article_id):
     save_articles(articles)
 
 
-# --- Sidebar : navigation ---
+# --- Gestion de l'authentification admin ---
+def get_admin_password():
+    """
+    Récupère le mot de passe admin depuis st.secrets.
+    Si la clé n'existe pas, retourne None (mode admin désactivé).
+    """
+    try:
+        return st.secrets["admin_password"]
+    except (KeyError, FileNotFoundError):
+        return None
+
+
+# État de session : par défaut, l'utilisateur n'est pas admin
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
+
+
+# --- Sidebar : navigation + login admin ---
 st.sidebar.title("📝 Mes analyses")
-page = st.sidebar.radio(
-    "Navigation",
-    ["Lire les articles", "Publier un nouvel article"],
-)
+
+# Bloc de connexion admin tout en bas de la sidebar
+with st.sidebar.expander("🔐 Espace admin"):
+    if st.session_state.is_admin:
+        st.success("Connecté en admin")
+        if st.button("Se déconnecter"):
+            st.session_state.is_admin = False
+            st.rerun()
+    else:
+        admin_pwd = get_admin_password()
+        if admin_pwd is None:
+            st.warning(
+                "Aucun mot de passe admin défini. "
+                "Configure `admin_password` dans les secrets Streamlit."
+            )
+        else:
+            pwd_input = st.text_input("Mot de passe", type="password", key="pwd_input")
+            if st.button("Se connecter"):
+                if pwd_input == admin_pwd:
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("Mot de passe incorrect")
+
+# Pages accessibles selon le mode
+if st.session_state.is_admin:
+    page = st.sidebar.radio(
+        "Navigation",
+        ["Lire les articles", "Publier un nouvel article"],
+    )
+else:
+    page = "Lire les articles"
+    st.sidebar.info("Mode lecture seule")
 
 st.sidebar.markdown("---")
 articles = load_articles()
@@ -80,7 +126,7 @@ if page == "Lire les articles":
     st.title("Mes analyses")
 
     if not articles:
-        st.info("Aucun article publié pour le moment. Va dans « Publier un nouvel article » pour commencer.")
+        st.info("Aucun article publié pour le moment.")
     else:
         # Filtre par catégorie
         filter_cat = st.selectbox(
@@ -95,12 +141,14 @@ if page == "Lire les articles":
         for article in filtered:
             with st.expander(f"**{article['title']}** — *{article['category']}* — {article['date']}"):
                 st.markdown(article["content"])
-                if st.button("🗑️ Supprimer", key=f"del_{article['id']}"):
-                    delete_article(article["id"])
-                    st.rerun()
+                # Bouton de suppression visible uniquement en mode admin
+                if st.session_state.is_admin:
+                    if st.button("🗑️ Supprimer", key=f"del_{article['id']}"):
+                        delete_article(article["id"])
+                        st.rerun()
 
 
-# --- Page 2 : Publier un nouvel article ---
+# --- Page 2 : Publier un nouvel article (admin uniquement) ---
 elif page == "Publier un nouvel article":
     st.title("Publier un nouvel article")
 
